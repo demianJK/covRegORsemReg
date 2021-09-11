@@ -1,328 +1,411 @@
-analyse <- function(dat#, # outputobjekt von simulation()
-                     #srep, pred_coll, N, repl, nsReps
-                    )
-  {
-  # auch im Original auskommentiert
-  # dat[,7:106] <- scale(dat[,7:106]) # zentrieren der Prädiktoren (?)
-  
-  ################################################################################
-  ### from multivariate normal distribution derived estimator for covariance matrix (i.e. without bessel correction)
-  ################################################################################  
+#' analyse data with 7 different methods (covLASSO, covRidge, covShrink, semLASSO, semRidge, regular ML sem, regular FIML sem)
+#'
+#' @param dat data set
+#'
+#' @import covglasso
+#' @import lavaan
+#' @import matrixcalc
+#' @import OpenMx
+#' @import rags2ridges
+#' @import regsem
+#' @import ShrinkCovMat
+#'
+#' @return model estimations (and covariance estimations) of all 7 approaches
 
-  n <- nrow(dat)
-  covMat <- ((n-1)/n)*cov(scale(dat, scale = FALSE)) # create ML covariance matrix of centered data (necessary for unbiased MLE)
-  
-  ################################################################################
-  ### Model Specification (lavaan)
-  ################################################################################  
-  
-  fac_loads <- c("f1 =~ NA*y1 + y2 + y3 + y4 + y5 + y6")
-  fac_varcs <- c("f1 ~~ 1*f1")
-  preds <- paste("f1 ~ ", paste("x", 1:100, sep = "", collapse="+"))
-  analyse.model_lavaan <- paste(fac_loads, fac_varcs, preds, sep="\n")
-  
-  #################################################################################
-  ### Matrix Properties
-  #################################################################################
-  
-  ## PD
-  # default: tol=1e-8
-  if (is.positive.definite(covMat) == TRUE) {
-    pd <- TRUE
-  } else {
-    pd <- FALSE
+
+########### einfach alle param estims standardisieren? weil regsem benötigt standard. input (ach, das ist ja was unterschiedliches)
+
+
+analyse <- function(dat){
+
+  # sanity checks:
+  if (!is.matrix(dat) & !is.data.frame(dat)) {
+    stop("data must be a matrix or data frame")
   }
-  
-  ## condition number 
-  # well-conditioned später beurteilen --> nochmal recherchieren
-  cond_before <- kappa(covMat) 
-  
-  ###################################################################################
+
+  ########################################################################################################################
+  ### Data Preparation & Properties
+  ########################################################################################################################
+
+  N <- nrow(dat)
+
+  # for semReg:
+  datS <- scale(dat, center=TRUE, scale=TRUE) # necessary for regsem (see Jacobucci et al., 2016, p.7)
+  S_biasedS <- ((N-1)/N)*cov(datS) # normal-based ML estimator of covariance matrix (i.e. without bessel correction)
+  pdS <- matrixcalc::is.positive.definite(S_biasedS)
+  S_ridgeS <- ridgeOption(S_biasedS)
+  pd_ridgeS <- matrixcalc::is.positive.definite(S_ridgeS)
+
+  # for covReg:
+  datC <- scale(dat, center=TRUE, scale=FALSE)
+  S_biasedC <- ((N-1)/N)*cov(datC) # normal-based ML estimator of covariance matrix (i.e. without bessel correction)
+  pdC <- matrixcalc::is.positive.definite(S_biasedC)
+  S_ridgeC <- ridgeOption(S_biasedC)
+  pd_ridgeC <- matrixcalc::is.positive.definite(S_ridgeC)
+
+  data_all <- list(data=dat,
+                   dataS=datS, S_biasedS=S_biasedS, pdS=pdS, S_ridgeS=S_ridgeS, pd_ridgeS=pd_ridgeS,
+                   dataC=datC, S_biasedC=S_biasedC, pdC=pdC, S_ridgeC=S_ridgeC, pd_ridgeC=pd_ridgeC)
+
+  ########################################################################################################################
   ### Data Analysis
-  ###################################################################################
-  
-  ################### RegSEM ######################################################
-  # Jacobucci et al. (2016)
-  # LASSO + Ridge
-  # nutzt ganzen Datensatz, aber nutzt automatisch RidgeOpt wenn NPD nach Dok
-  
-  #### 'normales' SEM:
-  
-  sem <- try(lavaan::sem(analyse.model_lavaan, # user specified model
-                         data=dat,
-                         fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values
-             silent=FALSE) # report of error messages not suppressed
-  
-  if(inherits(sem, "try-error")){
-    if (pd == TRUE){
-      sem <- NA
-    } else {
-      sem <- lavaan::sem(analyse.model_lavaan,
-                         data=dat,
+  ########################################################################################################################
+
+  ########### regular SEM ################################################################################################
+
+  ##### 1) ML ############################################################################################################
+
+  # model specification
+  fac_loads <- c("f1 =~ NA*y1 + y2 + y3 + y4 + y5 + y6") # NA for free estimation of first factor loading (default: fixed to 1)
+  fac_vars <- c("f1 ~~ 1*f1") # alternatively sem(..., std.lv = TRUE); then auto.fix.first = F (opposite is default)
+  preds <- paste0("f1 ~ ", paste0(names(dat)[7:ncol(dat)], collapse=" + "))
+  analyse.model_lavaan <- paste(fac_loads, fac_vars, preds, sep="\n")
+
+  # model estimation
+  sem_start <- Sys.time()
+  if (pdS == TRUE){
+    sem  <- try(lavaan::sem(analyse.model_lavaan, # user specified model
+                           data=datS,
+                           fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values (and are not estimated)
+    silent=TRUE) # report of error messages not suppressed
+
+    if(inherits(sem, "try-error")){
+      sem<- try(lavaan::sem(analyse.model_lavaan,
+                         data=datS,
                          fixed.x=TRUE,
-                         do.fit=FALSE) # model is not fit and current starting values of the model parameters are preserved
+                         do.fit=FALSE), # model is not fit and current starting values of the model parameters are preserved
+                silent=TRUE)
     }
+
+    if(inherits(sem,"try-error")){
+      sem <- NA
+    }
+
+  } else { # when npd then supply through ridge option attained pd covmat instead of data (since regsem extracts data or covmat from sem output; but ridge option covmat not in sem output)
+    sem <- try(lavaan::sem(analyse.model_lavaan, # user specified model
+                           sample.cov = S_ridgeS,
+                           sample.nobs = N,
+                           sample.cov.rescale=FALSE,
+                           missing = "listwise",
+                           fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values (and are not estimated)
+    silent=TRUE) # report of error messages not suppressed
+
+    if(inherits(sem, "try-error")){
+      sem <- try(lavaan::sem(analyse.model_lavaan,
+                         sample.cov = S_ridgeS,
+                         sample.nobs = N,
+                         sample.cov.rescale=FALSE,
+                         fixed.x=TRUE,
+                         do.fit=FALSE), # model is not fit and current starting values of the model parameters are preserved
+                 silent=TRUE)
+    }
+
+    if(inherits(sem,"try-error")){
+      sem <- NA
+    }
+
   }
-  
-  ################### RegSEM Lasso ######################
-  
-  ####### lslx ?????? besser ####################################################################################
-  
-  semLASSO <- try(cv_regsem(sem, # lavaan output object (which is input of this function)
-                             n.lambda=30, # number of penalization values to test ############ less for tetsing
-                             jump=.01, # amount to increase penalization each iteration
-                             type="lasso", # penalty type
-                             pars_pen=c(7:106), # parameter indicators to penalize (here: alle RegCoeffs)
-                             optMethod="rsolnp", # solver; rsolp is a nonlinear solver that doesn't rely on gradient information
-                             fit.ret=c("BIC","rmsea","AIC","CAIC","EBIC.5","EBIC.25"), # which fit indices to return (6)
-                             fit.ret2="train", # fit indices of which data set
-                             warm.start=FALSE), # whether start values are based on previous iteration (not recommmended)
-                   silent=TRUE)
+  sem_end <- Sys.time()
+  sem_time <- as.numeric(difftime(sem_end, sem_start, units = "secs"))
+
+
+  ###### 2) FIML ############################################################################################################
+
+  # model specification
+  mx_model <- OpenMx::mxModel(model="model_RAM", type="RAM",
+                              manifestVars = names(dat), latentVars = c("f1"),
+                              #mxFitFunctionML(rowDiagnostics=TRUE),
+                              mxData(observed=datS, type = "raw"), # raw and rowDiagnostics --> FIML
+                              mxPath(from = c("f1"), to = names(dat)[1:6]#, values = rep(1, 6)
+                                     ), # Factor loadings
+                              mxPath(from = names(dat), arrows = 2, #values = rep(1, ncol(dat))
+                                     ), # residuals (indicators and predictors)
+                              mxPath(from = c("f1"), arrows = 2, free = F, values = 1), # fix latent var to one
+                              mxPath(from = "one", to = names(dat)), # manifest means
+                              mxPath(from = "one", to = "f1", free=F, values=c(0)), # fix latent mean to zero
+                              mxPath(from = names(dat)[7:ncol(dat)], to = c("f1")) # predictors
+  )
+  # free=T (default) und values=... dann frei geschätzt mit starting values
+  # wenn free=F dann fixiert auf diesem Wert
+
+  # model estimation
+  fiml_start <- Sys.time()
+  fiml <- OpenMx::mxRun(mx_model)
+  fiml_end <- Sys.time()
+  fiml_time <- as.numeric(difftime(fiml_end, fiml_start, units = "secs"))
+
+  # if (fiml$output$status$code > 1){ # if not converged use tryhard; for status codes see https://openmx.ssri.psu.edu/wiki/errors
+  #   fimlTH_start <- Sys.time()
+  #   fiml <- OpenMx::mxTryHard(mx_model)
+  #   fimlTH_end <- Sys.time()
+  #   fimlTH_time <- as.numeric(difftime(fimlTH_end, fimlTH_start, units = "secs"))
+  # } else {
+  #   fimlTH_time <- 0
+  # }
+  # all_fiml_time <- fiml_time + fimlTH_time
+
+
+  #fiml  <- OpenMx::mxAutoStart(mx_model) # nicht nehmen, weil Model zu ULS oder DWLS geändert wird!
+  #fiml <- OpenMx::mxTryHard(mx_model, exhaustive = T)
+  # if (fiml$output$status$code > 1){ # dann Modell nicht konvergiert (nur konvergiert wenn 0 und 1)
+  #   fiml$convergence <- FALSE
+  # }
+
+  # im vergleich zu sem: residuen x1 bis xn geschätzt und mittelwerte indikatoren (aber sonst sehr ähnliche schätzungen)
+
+
+  ########## semReg ##########################################################################################################
+
+  ##### 1) semLASSO #######################################################################################################
+
+  semLASSO_start <- Sys.time()
+  semLASSO <- try(regsem::cv_regsem(sem,
+                                    n.lambda = 30,
+                                    jump = .01,
+                                    #lambda.start=0,
+                                    type = "lasso",
+                                    pars_pen = "regressions",
+                                    fit.ret = c("BIC", "rmsea", "AIC", "CAIC", "EBIC.5", "EBIC.25"),
+                                         ),
+                       silent=TRUE)
+
   if(inherits(semLASSO,"try-error")){
     semLASSO <- NA
   }
-  
-  ################### RegSEM Ridge ######################
-  
-  semRidge <- try(cv_regsem(sem, # lavaan output object (which is input of this function)
-                             n.lambda=30, # number of penalization values to test
-                             jump=.01, # amount to increase penalization each iteration
-                             type="ridge", # penalty type
-                             pars_pen=c(7:106), # parameter indicators to penalize (here: alle RegCoeffs)
-                             optMethod="rsolnp", # solver; rsolp is a nonlinear solver that doesn't rely on gradient information
-                             fit.ret=c("BIC","rmsea","AIC","CAIC","EBIC.5","EBIC.25"), # which fit indices to return (6)
-                             fit.ret2="train", # fit indices of which data set (?)
-                             warm.start=FALSE), # whether start values are based on previous iteration (not recommmended)
-                   silent=TRUE)
+
+  semLASSO_end <- Sys.time()
+  semLASSO_time <- as.numeric(difftime(semLASSO_end, semLASSO_start, units = "secs"))
+
+  ##### 2) semRidge #######################################################################################################
+
+  semRidge_start <- Sys.time()
+  semRidge <- try(regsem::cv_regsem(sem,
+                                    n.lambda = 30,
+                                    jump = .01,
+                                    #lambda.start=0,
+                                    type = "ridge",
+                                    pars_pen = "regressions",
+                                    fit.ret = c("BIC", "rmsea", "AIC", "CAIC", "EBIC.5", "EBIC.25"),
+                                    ),
+                       silent=TRUE)
+
   if(inherits(semRidge,"try-error")){
-    semLASSO <- NA
+    semRidge <- NA
   }
-  
-  ################### RegcovMat ##############################################################################################################
-  
-  ################### RegcovMat Shrink ######################
-  ### Touloumis (2015)
-  ## Wahl Target Matrix (und optimal penalty)
-  # !!:   # t(dat) weil functions expect variables to correspond to rows and subjects to columns
-  # Routine, um Wahl Target Matrix zu automatisieren für Loop:
-  dat_mt <- t(as.matrix(dat))
-  input_target <- targetselection(dat_mt)
-  target_lambdas <- c(input_target[1][[1]], input_target[2][[1]], input_target[3][[1]])
-  
-  # Eigentlich ist die Wahl der Targetmatrix noch dezidierter, aber teils schwammige Beschreibung in Paper
-  # within func: cov(t(dat)) --> /n-1
-  if (max(target_lambdas) == target_lambdas[1]) {
-    covShrink <- shrinkcovmat.equal(dat_mt)
-    target_type <- "equal"
-  } else if (max(target_lambdas) == target_lambdas[2]) {
-    covShrink <- shrinkcovmat.identity(dat_mt)
-    target_type <- "identity"
-  } else if (max(target_lambdas) == target_lambdas[3]) {
-    covShrink <- shrinkcovmat.unequal(dat_mt)
-    target_type <- "unequal"
-  }
-  
-  covShrink$target_type <- target_type
-  
-  ############################################################## noch speichern welche Target-Matrix genutzt?
-  
-  # Extrahieren der regularisierten KovMat
-  covShrink_sigmaHat <- covShrink$Sigmahat
-  
-  # well-conditioned (später beurteilen; erstmal nur condition number speichern):
-  cond_Shrink <- kappa(covShrink_sigmaHat)
-  
-  lav.out_covShrink <- try(lavaan::sem(analyse.model_lavaan, # user specified model
-                                       sample.cov = covShrink_sigmaHat,
+
+  semRidge_end <- Sys.time()
+  semRidge_time <- as.numeric(difftime(semRidge_end, semRidge_start, units = "secs"))
+
+  ########## covReg ##############################################################################################################
+  ##### 1) covShrink ##########################################################################################################
+  # uses raw data
+
+  # 1) covariance matrix estimation
+  covShrink_start <- Sys.time()
+  datCT <- t(datC) # parameter "data" expects rows of the data matrix data correspond to variables and the columns to subjects
+  targetSelect <- ShrinkCovMat::targetselection(datCT, centered=TRUE)
+
+  # whether lambdas differ significantly
+  if (round(targetSelect[[1]], 1) != round(targetSelect[[2]], 1) || round(targetSelect[[1]], 1) != round(targetSelect[[3]], 1) || round(targetSelect[[2]], 1) != round(targetSelect[[3]], 1)){
+    # if optimal shrinkage intensities differ significantly, then chose the one with the max shrinkage intensity
+    optShrinks <- c(targetSelect[[1]], targetSelect[[2]], targetSelect[[3]])
+    maxShrink <- max(optShrinks)
+    if (maxShrink == 1){
+      covShrink <- ShrinkCovMat::shrinkcovmat.equal(data=datCT, centered=TRUE)
+      covShrink$TargetType <- "equal"
+    } else if (maxShrink == 2){
+      covShrink <- ShrinkCovMat::shrinkcovmat.unequal(data=datCT, centered=TRUE)
+      covShrink$TargetType <- "unequal"
+    } else {
+      covShrink <- ShrinkCovMat::shrinkcovmat.equal(data=datCT, centered=TRUE)
+      covShrink$TargetType <- "equal"
+    }
+    # whether average sample cov is close to 1 (i.e., < 0.96)
+  } else if (!(round(targetSelect[[5]], 1) < 1)){
+    covShrink <- ShrinkCovMat::shrinkcovmat.identity(data=datCT, centered=TRUE)
+    covShrink$TargetType <- "identity"
+    # whether r is large (say more than one unit so as to account for the sampling variability)
+  } else if (targetSelect[[4]] >= 1){
+    covShrink <- ShrinkCovMat::shrinkcovmat.unequal(data=datCT, centered=TRUE)
+    covShrink$TargetType <- "unequal"
+    # otherwise use vIp
+  } else {
+    covShrink <- ShrinkCovMat::shrinkcovmat.equal(data=datCT, centered=TRUE)
+    covShrink$TargetType <- "equal"
+  } # see p. 258 & 259 for decision criteria
+  # output: Sigmahat (Tippfehler in Dok!), lambdahat, sigmasample, Target
+
+  covShrink_end <- Sys.time()
+  covShrink_time <- as.numeric(difftime(covShrink_end, covShrink_start, units = "secs"))
+
+  rownames(covShrink$Sigmahat) <- colnames(dat)
+  colnames(covShrink$Sigmahat) <- colnames(dat)
+
+  # 2) model estimation
+  sem_covShrink_start <- Sys.time()
+  sem_covShrink <- try(lavaan::sem(analyse.model_lavaan,
+                                       sample.cov = covShrink$Sigmahat,
+                                       sample.cov.rescale = FALSE, # sample.cov would be rescaled with (n/n-1)
                                        sample.nobs = N,
-                                       fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values
-                           silent=FALSE)
-  
-  if(inherits(lav.out_covShrink,"try-error")){   ## wenn es Fehler gab
-    lav.out_covShrink <- lavaan::sem(analyse.model_lavaan,
-                                     sample.cov = covShrink,
+                                       fixed.x=TRUE),
+                           silent=TRUE)
+
+  if(inherits(sem_covShrink,"try-error")){
+    sem_covShrink <- try(lavaan::sem(analyse.model_lavaan,
+                                     sample.cov = covShrink$Sigmahat,
+                                     sample.cov.rescale = FALSE,
                                      sample.nobs = N,
                                      fixed.x=TRUE,
-                                     do.fit=FALSE)
+                                     do.fit=FALSE),
+                         silent=TRUE)
   }
-  
-  
-  ################### RegcovMat Lasso ######################
-  ###### Bien & Tiebshirani (2011)
-  ### covglasso
-  # braucht Ridge Regression when npd (S.811f)
-  
-  if (pd == TRUE){
-    ## empirical determination of maximum value of lambda
-    #lambdaMax <- 
-    
-    ## find optimal lambda value (numerical approach)
-    lambda_covLASSO <- optLambda.covLASSO(data=dat, 
-                                          lambdaMin=0.001, 
-                                          lambdaMax=0.1 #lambdaMax
-                                          #fold = as.integer(nrow(dat)/2)  # Default
-    )
-    # whichRep = 6 --> 36 warnings
-    # In optimize(function(par) fn(par, ...)/con$fnscale, lower = lower,  ... :
-    # NA/Inf durch größte positive Zahl ersetzt
-    
-    # estimation of sigma hat
-    covLASSO <- covglasso(data=dat, # very similar results to S=covMAt, n=n
-                          lambda=lambda_covLASSO
-                          # start=diag(cov(dat)) Default (starting matrix for estimation algorithm)
-                          # crit = bic  Default
-                          # penalize.diag = FALSE   Default
-                          )
-  } else {
-    ## empirical determination of maximum value of lambda
-    #lambdaMax <- 
-    
-    ## find optimal lambda value (numerical approach)
-    lambda_covLASSO <- optLambda.covLASSO(data=dat, 
-                                          lambdaMin=0.001, 
-                                          lambdaMax=0.1 #lambdaMax
-                                          #fold = as.integer(nrow(dat)/2)  # Default
-    )
-    # whichRep = 6 --> 36 warnings
-    # In optimize(function(par) fn(par, ...)/con$fnscale, lower = lower,  ... :
-    # NA/Inf durch größte positive Zahl ersetzt
-    ## apply Ridge Option to covMat (add little constant to diagonal)
-    covMat_ridgeReg <- covMat # biased covmat
-    const <- diag(1e-5, ncol = ncol(covMat_ridgeReg), nrow = nrow(covMat_ridgeReg))
-    while(any(eigen(covMat_ridgeReg)$values < 0)){
-      covMat_ridgeReg <- covMat_ridgeReg + const
-    }
-    # 1e-5 ist scheinbar Wert aus lavaan Ridge option 
-    # https://github.com/yrosseel/lavaan/blob/master/R/lav_options.R
-    # https://github.com/yrosseel/lavaan/blob/master/R/lav_samplestats_icov.R
-    # alternativ:
-    # while(is.positive.definite(covMat_ridgeReg) == FALSE){
-    #   covMat_ridgeReg <- covMat_ridgeReg + const
-    # }
-    ## beide Alternativen scheinen äquivalent (weil gleiche cond numb cond_ridgeReg)
-    
-    # well-conditioned (später beurteilen; erstmal nur condition number speichern):
-    cond_ridgeReg <- kappa(covMat_ridgeReg)
-    
-    covLASSO <- covglasso(S=covMat_ridgeReg,
-                          n=n,
-                          lambda=lambda_covLASSO
-                          )
-    
-    covLASSO$cond_ridgeReg <- cond_ridgeReg
-  } 
-  
-  covLASSO_sigmaHat <- covLASSO$sigma
-  
-  ### Modellschätzung:
-  lav.out_covLASSO <- try(lavaan::sem(analyse.model_lavaan, # user specified model
-                                      sample.cov = covLASSO_sigmaHat, # braucht row und colnames
-                                      sample.nobs = N,
-                                      fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values
-                          silent=FALSE)
-  
-  if(inherits(lav.out_covLASSO,"try-error")){   ## wenn es Fehler gab
-    lav.out_covLASSO <- lavaan::sem(analyse.model_lavaan,
-                                    sample.cov = covLASSO,
-                                    sample.nobs = N,
-                                    fixed.x=TRUE,
-                                    do.fit=FALSE)
-  }
-  
-  ################### RegcovMat Ridge (Precision Matrix) ######################
-  ##### van Wieringen & Wessel (2016)
-  ## https://github.com/CFWP/rags2ridges/blob/master/R/rags2ridges.R
-  ### rags2ridges
-  #  "(5) is always p.d. when λa 2 (0; 1) ... the estimate is not necessarily well-conditioned ...
-  # To obtain a well-conditioned estimate in such situations, one should choose λa not too close to zero" (S.4)
-  # "ridge penalty deals with singularity and ill-conditioning through shrinkage of the eigenvalues of S^−1" (S.9)
-  # hier nur covMat nutzen
-  
-  ### LAMBDA & covMat ESTIMATION
-  # choice trough cross-validation or information criteria (see section 3.5, p 7ff)
-  # here: automatic search via Brent's method  to the calculation of a cross-validated negative log-likelihood score
-  # k-fold CV (Formel aus van Wieringen & Wessel, S. 8, die über Formel 9)
-  covRidge <- optPenalty.kCVauto(Y=as.matrix(dat),                                
-                                        lambdaMin=.001, # aus Dok
-                                        lambdaMax=30, # aus Dok
-                                        #lambdaInit = (lambdaMin + lambdaMax)/2,
-                                        fold = as.numeric(as.integer(nrow(dat)/2)) # abgerundet auf ganze zahl,  # gleicher Wert wie bei covLASSO
-                                        #cor = FALSE,
-                                        #target = default.target(covML(Y)),
-                                        #type = "Alt"     ## it seems NOT formula 9 (p.8) is evoked, but formulae before (unnumbered)
-  )
-  # output: optimal lambda and estimated precision matrix
-  covRidge_sigmaHat <- solve(covRidge$optPrec) # invert precision matrix estimate
-  
-  ### TARGET MATRIX
-  # choice trought default function: default.target(S)
-  # data-driven in the sense that the input matrix S provides the information for the diagonal entries
-  # lead to rotation equivariant alternative and archetypal Type I ridge estimators
-  # only assumption: has to be pd, therefore covmat has to be pd
-  
-  ### Model ESTIMATION
-  lav.out_covRidge <- try(lavaan::sem(analyse.model_lavaan, # user specified model
-                                      sample.cov = covRidge_sigmaHat, #
-                                      sample.nobs = N,
-                                      fixed.x=TRUE), # TRUE: exogenous ‘x’ covariates are considered fixed variables and the means, variances and covariances of these variables are fixed to their sample values
-                          silent=FALSE)
-  
-  if(inherits(lav.out_covRidge,"try-error")){   ## wenn es Fehler gab
-    lav.out_covRidge <- lavaan::sem(analyse.model_lavaan, 
-                                    sample.cov = covRidge, 
-                                    sample.nobs = N, 
-                                    fixed.x=TRUE, 
-                                    do.fit=FALSE)
-  }
-  
-  ################### FIML ######################
-  ### openmx
 
-  ### RAM Model erstellen:
-  mx_model <- mxModel("model_RAM", type="RAM",
-                      manifestVars = names(dat),
-                     latentVars   = c("f1"),
-                     mxFitFunctionML(rowDiagnostics=TRUE),
-                     mxPath(from = c("f1"), to = names(dat)[1:6]), # Factor loadings
-                     mxPath(from = names(dat), arrows = 2), # manifest residuals
-                     mxPath(from = c("f1"), arrows = 2, free = F, values = 1), # latents fixed@1
-                     mxPath(from = "one", to = names(dat), arrows = 1), # manifest means
-                     mxData(dat, type = "raw")
-                     )
-
-  ### Model Estimation:
-  fiml  <- mxAutoStart(mx_model) 
-  fiml <- mxTryHard(mx_model)
-  if (fiml$output$status$code > 1){ # dann Modell nicht konvergiert (nur konvergiert wenn 0 und 1)
-    # Quelle mx codes: https://openmx.ssri.psu.edu/wiki/errors
-    fiml$converged <- "no"
+  if(inherits(sem_covShrink,"try-error")){
+    sem_covShrink <- NA
   }
-  
-  
+
+  sem_covShrink_end <- Sys.time()
+  sem_covShrink_time <- as.numeric(difftime(sem_covShrink_end, sem_covShrink_start, units = "secs"))
+  all_covShrink_time <- covShrink_time + sem_covShrink_time
+
+  ################### covLASSO ######################
+  # needs centered data (see p. 808)
+
+  # 1) covariance matrix estimation
+  covLASSO_start <- Sys.time()
+  # find maximum value of lambda
+  covLASSO_lambdaMax <- lambdaUpperLimit(data=dat, lambdaMax=30, # value from documentation optPenalty.kCVauto() (i.e. covRidge)
+                                       type="covLASSO") # stop: when 80% of off-diagonal values are zero (default)
+
+  # to find best lambda value vector of values is supplied
+  covLASSO_lambdaVector <- seq(0, covLASSO_lambdaMax$lambdaMax, # empirically determined
+                              .005) # step size
+
+  if (pdC == TRUE){
+    covLASSO <- covglasso::covglasso(data=datC,
+                                         lambda=covLASSO_lambdaVector,
+                                         crit="bic" # model selection criterion
+                                         # start=diag(diag(S)) (starting matrix for estimation algorithm)
+                                         # penalize.diag = FALSE
+                                         # regularize all off-diagonal elements (default: diagonale of all ones except diagonal)
+                                         )
+  } else { # if matrix is npd, ridge option is employed
+    covLASSO <- covglasso::covglasso(S=S_ridgeC,
+                                         n=N,
+                                         lambda=covLASSO_lambdaVector,
+                                         crit="bic")
+  } # output: sigma, ..., log-likelihood, ..., bic, BIC, ... lambda
+  covLASSO_end <- Sys.time()
+  covLASSO_time <- as.numeric(difftime(covLASSO_end, covLASSO_start, units = "secs"))
+  # add best lambda value to result list (bc only sigma hat with best lambda saved in output):
+  covLASSO$bestLambda <- covLASSO_lambdaVector[which(covLASSO$BIC == covLASSO$bic)]
+
+  # 2) Model estimation
+  sem_covLASSO_start <- Sys.time()
+  sem_covLASSO <- try(lavaan::sem(analyse.model_lavaan,
+                                          sample.cov = covLASSO$sigma,
+                                          sample.cov.rescale = FALSE,
+                                          sample.nobs = N,
+                                          fixed.x=TRUE),
+                              silent=TRUE)
+
+  if(inherits(sem_covLASSO,"try-error")){
+    sem_covLASSO <- try(lavaan::sem(analyse.model_lavaan,
+                                        sample.cov = covLASSO$sigma,
+                                        sample.cov.rescale = FALSE,
+                                        sample.nobs = N,
+                                        fixed.x=TRUE,
+                                        do.fit=FALSE),
+                        silent=TRUE)
+  }
+
+  if(inherits(sem_covLASSO,"try-error")){
+    sem_covLASSO <- NA
+  }
+
+  # sem_covLASSO <- tryCatch(lavaan::sem(analyse.model_lavaan,
+  #                                 sample.cov = covLASSO$sigma,
+  #                                 sample.cov.rescale = FALSE,
+  #                                 sample.nobs = N,
+  #                                 fixed.x=TRUE),
+  #                     finally = tryCatch(lavaan::sem(analyse.model_lavaan,
+  #                                                    sample.cov = covLASSO$sigma,
+  #                                                    sample.cov.rescale = FALSE,
+  #                                                    sample.nobs = N,
+  #                                                    fixed.x=TRUE,
+  #                                                    do.fit=FALSE),
+  #                                        finally = NA))
+
+  sem_covLASSO_end <- Sys.time()
+  sem_covLASSO_time <- as.numeric(difftime(sem_covLASSO_end, sem_covLASSO_start, units = "secs"))
+  all_covLASSO_time <- covLASSO_time + sem_covLASSO_time
+
+  ##### 3) covRidge ########################################################################################################
+  # needs centered data (see p. 1)
+
+  # 1) covariance matrix estimation
+  covRidge_start <- Sys.time()
+  # determine maximal value for lambda
+  covRidge_lambdaMax <- lambdaUpperLimit(data=datC, lambdaMax=30, # value from documentation optPenalty.kCVauto()
+                                       type="covRidge") # stop: when 80% of regularized matrix elements equal target matrix (liberal rounding first number after decimal point)
+  # numerical approximation of optimal lambda
+  covRidge <- rags2ridges::optPenalty.kCVauto(Y=datC, # cross-prod approach via rags2ridges::covML()
+                                                  lambdaMin=0.001, # value from documentation optPenalty.kCVauto(); also lambdaMax
+                                                  lambdaMax=covRidge_lambdaMax$lambdaMax,
+                                                  #lambdaInit = (lambdaMin + lambdaMax)/2,
+                                                  fold = as.numeric(as.integer(N/2)) # rounded on whole number; same choice as with covLASSO
+                                                  #target = default.target(covML(Y)),
+                                                  #type = "Alt"
+                                                  )  # output: optimal lambda and estimated precision matrix
+  covRidge$sigma <- solve(covRidge$optPrec) # invert precision matrix estimate
+  covRidge_end <- Sys.time()
+  covRidge_time <- as.numeric(difftime(covRidge_end, covRidge_start, units = "secs"))
+
+  # 2) Model estimation
+  sem_covRidge_start <- Sys.time()
+  sem_covRidge <- try(lavaan::sem(analyse.model_lavaan,
+                                          sample.cov = covRidge$sigma,
+                                          sample.cov.rescale = FALSE,
+                                          sample.nobs = N,
+                                          fixed.x=TRUE),
+                              silent=TRUE)
+
+  if(inherits(sem_covRidge,"try-error")){
+    sem_covRidge <- try(lavaan::sem(analyse.model_lavaan,
+                                        sample.cov = covRidge$sigma,
+                                        sample.cov.rescale = FALSE,
+                                        sample.nobs = N,
+                                        fixed.x=TRUE,
+                                        do.fit=FALSE),
+                        silent=TRUE)
+  }
+
+  if(inherits(sem_covRidge,"try-error")){
+    sem_covRidge <- NA
+  }
+
+  sem_covRidge_end <- Sys.time()
+  sem_covRidge_time <- as.numeric(difftime(sem_covRidge_end, sem_covRidge_start, units = "secs"))
+  all_covRidge_time <- covRidge_time + sem_covRidge_time
+
+
   #####################################
-  
+
   out <- list(
-    dat,
-    covMat,
-    pd,
-    cond_before,
-    cond_ridgeReg,
-    # cond_shrink = cond_shrink,
-    # mehr condition numbers von anderen Verfahren?
-    pred_coll,
-    N,
-    trueRep,
-    sem, # "normales" SEM
-    semLASSO, # regsem lasso
-    semRidge, # regsem ridge
-    covShrink, # shrinkcovmat 
-    lav.out_covShrink, 
-    covLASSO, # spcov
-    lav.out_covLASSO,
-    covRidge, # rags2ridges
-    lav.out_covRidge,
-    fiml # openmx
+    data=data_all,
+    sem=sem,
+    fiml=fiml,
+    semLASSO=semLASSO,
+    semRidge=semRidge,
+    covShrink=list(cov=covShrink, sem=sem_covShrink),
+    covLASSO=list(cov=covLASSO, sem=sem_covLASSO),
+    covRidge=list(cov=covRidge, sem=sem_covRidge),
+    times=list(sem=sem_time, fiml=fiml_time,
+               semLASSO=semLASSO_time, semRidge=semRidge_time,
+               covShrink=covShrink_time, sem_covShrink=sem_covShrink_time, all_covShrink=all_covShrink_time,
+               covLASSO=covLASSO_time, sem_covLASSO=sem_covLASSO_time, all_covLASSO=all_covLASSO_time,
+               covRidge=covRidge_time, sem_covRidge=sem_covRidge_time, all_covRidge=all_covRidge_time)
   )
-  
+
   return(out) ########################################
 }

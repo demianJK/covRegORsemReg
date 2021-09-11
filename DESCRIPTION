@@ -1,11 +1,20 @@
-Package: covRegOrsemReg
+Package: covRegORsemReg
 Type: Package
-Title: What the Package Does (Title Case)
+Title: Code to Master thesis: When to regularize? Comparing regularization of covariance matrices with regularization of structural equation model parameters in terms of the RMSE
 Version: 0.1.0
-Author: Who wrote it
-Maintainer: The package maintainer <yourself@somewhere.net>
+Depends: 
+     covglasso (>= 1.0.2),
+     lavaan (>= 0.6-8),
+     matrixcalc (>= 1.0-4),
+     OpenMx (>= 2.19.5),
+     rags2ridges (>= 2.2.4),
+     regsem (>= 1.8.0),
+     ShrinkCovMat (>= 1.4.0),
+Author: Julia-Kim Walther
+Maintainer: Julia-Kim Walther <julia-kim.walther@gmx.de>
 Description: More about what it does (maybe more than one line)
     Use four spaces when indenting paragraphs within the Description.
 License: What license is it under?
 Encoding: UTF-8
 LazyData: true
+RoxygenNote: 7.1.1
